@@ -1,7 +1,7 @@
 use futures::ready;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::FromRawFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::unix::AsyncFd;
@@ -10,12 +10,13 @@ use tokio::process::{Child, Command};
 
 pub struct AsyncPty {
     master: AsyncFd<File>,
-    slave: AsyncFd<File>,
+    _child: Child,
 }
 
 impl AsyncPty {
     pub fn open() -> io::Result<Self> {
-        let (master, salve) = unsafe {
+        let mut cmd = Command::new("fish");
+        let master = unsafe {
             let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK);
             if fd < 0 {
                 return Err(io::Error::last_os_error());
@@ -34,31 +35,46 @@ impl AsyncPty {
             if rc < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let slave_fd = libc::open(buf.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            let winsize = libc::winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let rc = libc::ioctl(fd, libc::TIOCSWINSZ, &winsize);
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
 
-            (File::from_raw_fd(fd), File::from_raw_fd(slave_fd))
+            let slave_fd = libc::open(buf.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            cmd.pre_exec(move || {
+                libc::close(fd);
+                libc::setsid();
+
+                let rc = libc::ioctl(slave_fd, libc::TIOCSCTTY);
+                if rc == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+
+                libc::dup2(slave_fd, 0);
+                libc::dup2(slave_fd, 1);
+                libc::dup2(slave_fd, 2);
+                libc::close(slave_fd);
+
+                Ok(())
+            });
+
+            File::from_raw_fd(fd)
         };
 
         Ok(Self {
             master: AsyncFd::new(master)?,
-            slave: AsyncFd::new(salve)?,
+            _child: cmd.spawn()?,
         })
-    }
-
-    pub async fn spawn(&self) -> Result<Child, io::Error> {
-        let mut cmd = Command::new("bash");
-        let slave_fd = self.slave.as_raw_fd();
-        unsafe {
-            cmd.pre_exec(move || {
-                libc::setsid();
-                libc::dup2(slave_fd, 0);
-                libc::dup2(slave_fd, 1);
-                libc::dup2(slave_fd, 2);
-
-                Ok(())
-            });
-        }
-        Ok(cmd.spawn()?)
     }
 
     pub async fn read(&self, out: &mut [u8]) -> io::Result<usize> {
@@ -123,7 +139,6 @@ impl AsyncWrite for AsyncPty {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // tcp flush is a no-op
         Poll::Ready(Ok(()))
     }
 
@@ -135,10 +150,13 @@ impl AsyncWrite for AsyncPty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn my_test() {
         let pty = AsyncPty::open().unwrap();
-        pty.spawn()
+        let mut buf = [0u8; 512];
+        pty.write(b"echo `date` > /tmp/term\n\r").await;
+        pty.read(&mut buf).await;
         assert!(true);
     }
 }
