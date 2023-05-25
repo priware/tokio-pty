@@ -1,0 +1,11 @@
+[package]
+name = "tokio-pty"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3.28"
+libc = "0.2.144"
+tokio = {version = "1.28.1", features = ["net", "rt", "macros", "process"]}
