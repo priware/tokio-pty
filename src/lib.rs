@@ -1,7 +1,7 @@
 use futures::ready;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::unix::AsyncFd;
@@ -75,6 +75,22 @@ impl AsyncPty {
             master: AsyncFd::new(master)?,
             _child: cmd.spawn()?,
         })
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        unsafe {
+            let winsize = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let rc = libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &winsize);
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
     }
 
     pub async fn read(&self, out: &mut [u8]) -> io::Result<usize> {
